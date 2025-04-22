@@ -1,3 +1,13 @@
+# IMPORTANT: RUN THIS CELL IN ORDER TO IMPORT YOUR KAGGLE DATA SOURCES,
+# THEN FEEL FREE TO DELETE THIS CELL.
+# NOTE: THIS NOTEBOOK ENVIRONMENT DIFFERS FROM KAGGLE'S PYTHON
+# ENVIRONMENT SO THERE MAY BE MISSING LIBRARIES USED BY YOUR
+# NOTEBOOK.
+import kagglehub
+devvratmathur_micro_expression_dataset_for_lie_detection_path = kagglehub.dataset_download('devvratmathur/micro-expression-dataset-for-lie-detection')
+
+print('Data source import complete.')
+
 # Micro-expression Lie Detection using Dual-Stream Transformer (Visual + Motion)
 
 import os
