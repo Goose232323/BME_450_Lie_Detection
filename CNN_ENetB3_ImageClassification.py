@@ -1,0 +1,206 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+import os
+import argparse
+import torch
+import numpy as np
+from torch.utils.data import Dataset
+from PIL import Image
+import torchvision.transforms as transforms
+import torch.nn as nn
+import torch.optim as optim
+from torchvision.models import efficientnet_b3, EfficientNet_B3_Weights
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
+
+import sys
+from tqdm import tqdm
+
+data_folder = 'D:/PycharmProjects/input/sports-classification/'
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor()
+])
+
+class ImageDataset(Dataset):
+    def __init__(self, root_dir, transform=None):
+        self.root_dir = root_dir
+        self.transform = transform
+        self.images = []
+        self.labels = []
+        self.class_labels = {}
+        class_idx = 0
+        for class_dir in os.listdir(self.root_dir):
+            class_dir_path = os.path.join(self.root_dir, class_dir)
+            if os.path.isdir(class_dir_path):
+                self.class_labels[class_dir] = class_idx
+                class_idx += 1
+                for img_filename in os.listdir(class_dir_path):
+                    img_path = os.path.join(class_dir_path, img_filename)
+                    self.images.append(img_path)
+                    self.labels.append(self.class_labels[class_dir])
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, idx):
+        image = Image.open(self.images[idx])
+        label = self.labels[idx]
+        if image.mode == "L":
+            image = Image.merge("RGB", (image, image, image))
+        if self.transform:
+            image = self.transform(image)
+        return image, label
+
+if __name__ == '__main__':
+    train_dataset_full = ImageDataset(data_folder + 'train', transform=transform)
+    val_dataset_full = ImageDataset(data_folder + 'valid', transform=transform)
+    test_dataset_full = ImageDataset(data_folder + 'test', transform=transform)
+
+    class_labels_dict = {v: k for k, v in train_dataset_full.class_labels.items()}
+    print(class_labels_dict)
+
+    debug_mode = False
+
+    if debug_mode:
+        from torch.utils.data import Subset
+        train_dataset = Subset(train_dataset_full, list(range(500)))
+        val_dataset = Subset(val_dataset_full, list(range(100)))
+        test_dataset = Subset(test_dataset_full, list(range(100)))
+    else:
+        train_dataset = train_dataset_full
+        val_dataset = val_dataset_full
+        test_dataset = test_dataset_full
+
+    train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4)
+    val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=32, shuffle=True, num_workers=4)
+    test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=32, shuffle=True, num_workers=4)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    weights = EfficientNet_B3_Weights.DEFAULT
+
+    model = efficientnet_b3(weights=weights).to(device)
+    num_classes = len(set(train_dataset_full.labels))
+    model.classifier = nn.Sequential(
+        nn.Dropout(p=0.3, inplace=True),
+        nn.Linear(in_features=1536, out_features=num_classes)
+    ).to(device)
+
+    best_model = efficientnet_b3(weights=None).to(device)
+    best_model.classifier = nn.Sequential(
+        nn.Dropout(p=0.3, inplace=True),
+        nn.Linear(in_features=1536, out_features=num_classes)
+    ).to(device)
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.0005)
+
+    def compute_acc(preds, labels):
+        preds_ = preds.data.max(1)[1]
+        correct = preds_.eq(labels.data).cpu().sum()
+        return float(correct) / float(len(labels.data)) * 100.0
+
+    def plot_loss_accuracy(train_losses, val_losses, train_accuracies, val_accuracies):
+        fig, axs = plt.subplots(1, 2, figsize=(10, 5))
+        axs[0].plot(train_losses, label='Train Loss')
+        axs[0].plot(val_losses, label='Validation Loss')
+        axs[0].set_title("Losses over Epochs")
+        axs[0].set_xlabel("Epoch")
+        axs[0].set_ylabel("Loss")
+        axs[0].legend()
+
+        axs[1].plot(train_accuracies, label='Train Accuracy')
+        axs[1].plot(val_accuracies, label='Validation Accuracy')
+        axs[1].set_title("Accuracies over Epochs")
+        axs[1].set_xlabel("Epoch")
+        axs[1].set_ylabel("Accuracy")
+        axs[1].legend()
+
+        plt.tight_layout()
+        plt.savefig("training_plots.png")
+
+    train_losses = []
+    train_accuracies = []
+    val_losses = []
+    val_accuracies = []
+    show_every = 50
+
+    best_val_loss = float('inf')
+    patience = 5
+    num_no_improvement = 0
+
+    for epoch in range(1):
+        store_train_loss = []
+        store_train_acc = []
+        store_val_loss = []
+        store_val_acc = []
+
+        for i, (images, labels) in enumerate(tqdm(train_dataloader, desc=f"Epoch {epoch+1} [Train]")):
+            images = images.to(device)
+            labels = labels.to(device)
+            optimizer.zero_grad()
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            train_acc = compute_acc(outputs, labels)
+            store_train_loss.append(loss.item())
+            store_train_acc.append(train_acc)
+
+            if i % show_every == 0:
+                print('[%d, %5d] Training loss: %.3f  Training acc: %.3f' %
+                      (epoch + 1, i + 1, np.mean(store_train_loss[-show_every:]), np.mean(store_train_acc[-show_every:])))
+
+        train_losses.append(np.mean(store_train_loss))
+        train_accuracies.append(np.mean(store_train_acc))
+
+        model.eval()
+        for i, (val_images, val_labels) in enumerate(tqdm(val_dataloader, desc=f"Epoch {epoch+1} [Val]")):
+            val_images = val_images.to(device)
+            val_labels = val_labels.to(device)
+
+            with torch.no_grad():
+                val_outputs = model(val_images)
+                val_loss = criterion(val_outputs, val_labels)
+                val_acc = compute_acc(val_outputs, val_labels)
+
+            store_val_loss.append(val_loss.item())
+            store_val_acc.append(val_acc)
+
+        mean_val_loss = np.mean(store_val_loss)
+        if mean_val_loss < best_val_loss:
+            best_val_loss = mean_val_loss
+            best_model.load_state_dict(model.state_dict(), strict=False)
+            num_no_improvement = 0
+        else:
+            num_no_improvement += 1
+        if num_no_improvement == patience:
+            break
+
+        val_losses.append(np.mean(store_val_loss))
+        val_accuracies.append(np.mean(store_val_acc))
+
+        print("Epoch {}: Train Loss: {:.4f}, Validation Loss: {:.4f}, Train Accuracy: {:.2f}%, Validation Accuracy: {:.2f}%".format(
+            epoch, train_losses[-1], val_losses[-1], train_accuracies[-1], val_accuracies[-1]))
+
+    print('Finished Training')
+
+    plot_loss_accuracy(train_losses, val_losses, train_accuracies, val_accuracies)
+
+    best_model.to(device)
+    best_model.eval()
+
+    store_test_acc = []
+    for i, (test_images, test_labels) in enumerate(tqdm(test_dataloader, desc="Testing")):
+        test_images = test_images.to(device)
+        test_labels = test_labels.to(device)
+
+        with torch.no_grad():
+            test_outputs = model(test_images)
+            test_acc = compute_acc(test_outputs, test_labels)
+        store_test_acc.append(test_acc)
+
+    avg_test_accuracy = np.mean(store_test_acc)
+    print("The test accuracy is: ", avg_test_accuracy)
